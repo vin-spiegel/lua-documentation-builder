@@ -45,6 +45,9 @@ namespace LDocBuilder
 
         public Program()
         {
+            // var builder = new DLLAndXmlBuilder(path, outpath).Build();
+            // var assembly = builder.LoadAssembly();
+            
             BuildDllAndXml(@"C:\Projects\LDocBuilder\Target/Target.csproj");
             var assembly = Assembly.LoadFrom(@"C:\Projects\LDocBuilder\Target\bin\Debug\Target.dll");
             //
