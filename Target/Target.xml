@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>Target</name>
+    </assembly>
+    <members>
+        <member name="T:Target.Core.TestClass1">
+            <summary xml:lang="ko">
+            클래스 1
+            </summary>
+        </member>
+        <member name="M:Target.Core.TestClass1.#ctor">
+            <summary>
+            생성자
+            </summary>
+        </member>
+        <member name="M:Target.Core.TestClass1.Method1(System.String,System.Int32)">
+            <summary xml:lang="ko">
+            메소드 1
+            </summary>
+            <param name="a">파라미터1</param>
+            <param name="b">파라미터2</param>
+        </member>
+        <member name="T:Target.Core.TestClass2">
+            <summary>
+            클래스2
+            </summary>
+        </member>
+        <member name="T:Target.Program">
+            <summary>
+            프로그램 진입점
+            </summary>
+        </member>
+    </members>
+</doc>
