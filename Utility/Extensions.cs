@@ -4,6 +4,8 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices.ComTypes;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Xml;
 
 /// <summary>
@@ -68,8 +70,10 @@ public static class DocumentationExtensions
     {
         var element = type.GetDocumentation();
         var summaryElm = element?.SelectSingleNode("summary");
-        if (summaryElm == null) return "";
-        return summaryElm.InnerText.Trim();
+        if (summaryElm == null) 
+            return "";
+        
+        return Regex.Replace(summaryElm.InnerText.Trim(), "[\n][\\s]+", "---");
     }
     
     /// <summary>
@@ -82,7 +86,7 @@ public static class DocumentationExtensions
         var element = memberInfo.GetDocumentation();
         var summaryElm = element?.SelectSingleNode("summary");
         if (summaryElm == null) return "";
-        return summaryElm.InnerText.Trim();
+        return Regex.Replace(summaryElm.InnerText.Trim(), "[\n][\\s]+", "---");
     }
 
     private static readonly string[] ExcludedMethods = 
@@ -123,6 +127,20 @@ public static class DocumentationExtensions
         var element = memberInfo.GetDocumentation();
         var res = element?.SelectSingleNode("exclude");
         return res == null;
+    }
+    
+    public static bool IsExcluded(this Type type)
+    {
+        var element = type.GetDocumentation();
+        var res = element?.SelectSingleNode("exclude");
+        return res != null;
+    }
+    
+    public static bool IsExcluded(this PropertyInfo type)
+    {
+        var element = type.GetDocumentation();
+        var res = element?.SelectSingleNode("exclude");
+        return res != null;
     }
 
     /// <summary>
@@ -235,6 +253,67 @@ public static class ReflectionExtensions
             if (mi.Name == "Equals" || mi.Name == "GetHashCode" || mi.Name == "GetType" || mi.Name == "ToString")
                 continue;
             list.Add(mi);
+        }
+        return list.ToArray();
+    }
+
+    public static string GetLuaDocumentation(this Type type)
+    {
+        var builder = new StringBuilder();
+        builder.Append("---@meta\n");
+        builder.Append($"---{type.GetSummary()}\n");
+        
+        var baseType = type.BaseType != null ? " : " + type.BaseType.Name : "";
+        builder.Append($"---@class {type.ToString()}{baseType}\n");
+
+        // Register Fields
+        foreach (var prop in type.GetProperties())
+        {
+            if (prop.IsExcluded())
+                continue;
+            if (prop.GetSummary() != "")
+                builder.Append($"---{prop.GetSummary()}\n");
+            var line = $"---@field {prop.Name} {prop.GetLuaType()}\n";
+            builder.Append(line);
+            // Console.WriteLine($"---@field {prop.Name} {prop.GetLuaType()}");
+        }
+        
+        var className = type.Name.StartsWith("Script") ? type.Name.Replace("Script", "") : type.Name;
+        builder.Append($"local {className} = {{}}\n");
+
+        return builder.ToString();
+    }
+
+    private static readonly Dictionary<string, string> LuaTypes = new Dictionary<string, string>()
+    {
+        {"System.Int32","integer"},
+        {"System.Int64","integer"},
+        {"System.Single","number"},
+        {"MoonSharp.Interpreter.Table","table"},
+        {"System.Boolean","boolean"},
+        {"System.String","string"},
+    };
+
+    public static string GetLuaType(this PropertyInfo mi)
+    {
+        var name = mi.PropertyType.ToString();
+        foreach (var pair in LuaTypes.Where(pair => name.Contains(pair.Key)))
+        {
+            return name.Replace(pair.Key, pair.Value);
+        }
+        return name;
+    }
+
+    public static Type[] GetTypesContainsAttribute(this Assembly assembly, string attribute)
+    {
+        var list = new List<Type>();
+        foreach (var type in assembly.GetTypes())
+        {
+            if (!type.GetCustomAttributes().ToList().Exists(x => x.ToString().Contains(attribute))) 
+                continue;
+            if (type.IsExcluded())
+                continue;
+            list.Add(type);
         }
         return list.ToArray();
     }
