@@ -102,7 +102,8 @@ public static class DocumentationExtensions
         var element = methodInfo.GetDocumentation();
         var summaryElm = element?.SelectSingleNode("summary");
         if (summaryElm == null) return "";
-        return summaryElm.InnerText.Trim();
+        var res = Regex.Replace(summaryElm.InnerText.Trim(), "[\n][\\s]+", "---");
+        return res;
     }
     
     /// <summary>
@@ -115,18 +116,18 @@ public static class DocumentationExtensions
         var xml = (pi.Member as MethodInfo).GetDocumentation();
         foreach (XmlElement elemental in xml.GetElementsByTagName("param"))
         {
-            if (elemental.Attributes?["name"].Value == pi.Name)
-                return elemental.InnerText.Trim();
+            if (elemental?.Attributes?["name"].Value == pi.Name)
+                return Regex.Replace(elemental.InnerText.Trim(), "[\n][\\s]+", "---");
         }
-
         return "";
     }
-    
-    public static bool IsExcluded(this MethodInfo memberInfo)
+
+    public static bool IsExcluded(this MethodInfo methodInfo)
     {
-        var element = memberInfo.GetDocumentation();
+        var element = methodInfo.GetDocumentation();
         var res = element?.SelectSingleNode("exclude");
         return res == null;
+        return true;
     }
     
     public static bool IsExcluded(this Type type)
@@ -243,30 +244,70 @@ public static class DocumentationExtensions
 
 public static class ReflectionExtensions
 {
-    public static MethodInfo[] GetMethodsEx(this Type type)
+    private static string[] _withinGlobals = new[]
+    {
+        "Equals",
+        "GetHashCode",
+        "GetType",
+        "ToString",
+        "op_Implicit",
+        "ctor"
+    };
+    
+    private static readonly Dictionary<string, string> LuaTypes = new Dictionary<string, string>()
+    {
+        {"System.UInt32","integer"},
+        {"System.Int32","integer"},
+        {"System.Int64","integer"},
+        {"System.Single","number"},
+        {"MoonSharp.Interpreter.Table","table"},
+        {"System.Boolean","boolean"},
+        {"System.String","string"},
+        {"Null","nil"},
+    };
+
+    private static bool isBasic(this MethodInfo mi) => _withinGlobals.Contains(mi.Name);
+
+    private static bool isGetterOrSetter(this MethodInfo mi) => 
+        (mi.Name.StartsWith("get_") || mi.Name.StartsWith("set_"));
+
+    private static MethodInfo[] _GetMethods(Type type, bool isOverloaded)
     {
         var list = new List<MethodInfo>();
+        var within = new List<MethodInfo>();
         foreach (var mi in type.GetMethods())
         {
-            if (mi.Name.StartsWith("get_") || mi.Name.StartsWith("set_"))
+            if (mi.IsExcluded())
                 continue;
-            if (mi.Name == "Equals" || mi.Name == "GetHashCode" || mi.Name == "GetType" || mi.Name == "ToString")
+            if (mi.isBasic())
                 continue;
+            if (mi.isGetterOrSetter()) // Within Getter Setter
+                continue;
+            if (list.Exists(x => x.Name == mi.Name)) // within Overload
+            {
+                within.Add(mi);
+                continue;
+            }
             list.Add(mi);
         }
-        return list.ToArray();
+        return isOverloaded ? within.ToArray() : list.ToArray();
     }
+    
+    public static MethodInfo[] GetOverloadedMethods(this Type type) => _GetMethods(type, true);
 
+    public static MethodInfo[] GetMethodsEx(this Type type) => _GetMethods(type, false);
+
+    // public static MethodInfo
     public static string GetLuaDocumentation(this Type type)
     {
         var builder = new StringBuilder();
         builder.Append("---@meta\n");
         builder.Append($"---{type.GetSummary()}\n");
         
-        var baseType = type.BaseType != null ? " : " + type.BaseType.Name : "";
-        builder.Append($"---@class {type.ToString()}{baseType}\n");
+        var baseType = type.BaseType != null ? $" : {type.BaseType}" : "";
+        builder.Append($"---@class {type}{baseType}\n");
 
-        // Register Fields
+        // Build Fields
         foreach (var prop in type.GetProperties())
         {
             if (prop.IsExcluded())
@@ -275,25 +316,80 @@ public static class ReflectionExtensions
                 builder.Append($"---{prop.GetSummary()}\n");
             var line = $"---@field {prop.Name} {prop.GetLuaType()}\n";
             builder.Append(line);
-            // Console.WriteLine($"---@field {prop.Name} {prop.GetLuaType()}");
         }
-        
-        var className = type.Name.StartsWith("Script") ? type.Name.Replace("Script", "") : type.Name;
-        builder.Append($"local {className} = {{}}\n");
 
+        builder.Append($"local {type.Name.Replace("Script", "")} = {{}}");
+
+        var methods = type.GetMethodsEx();
+        var overloaded = type.GetOverloadedMethods();
+        
+        // Build Methods
+        foreach (var methodInfo in methods)
+        {
+            var summary = methodInfo.GetSummary();
+            if (summary != "")
+                builder.Append($"---{summary}\n");
+            
+            // parameters
+            var parameters = methodInfo.GetParameters();
+            var parameterText = "";
+            for (var index = 0; index < parameters.Length - 2; index++)
+            {
+                var parameter = parameters[index];
+                builder.Append($"---@param {parameter.Name} {parameter.GetLuaType()}\n");
+
+                parameterText += parameter.Name;
+                if (index < parameters.Length - 3)
+                    parameterText += ", ";
+            }
+            
+            var returnType = methodInfo.ReturnType;
+            if (!returnType.ToString().Contains("Void"))
+            {
+                builder.Append($"---@return {methodInfo.GetLuaReturnType()} {methodInfo.ReturnParameter?.Name}\n");
+            }
+
+            var overloads = overloaded.Where(x => x.Name == methodInfo.Name).ToArray();
+            if (overloads.Length > 0)
+            {
+                foreach (var overload in overloads)
+                {
+                    var paramBuilder = new StringBuilder();
+                    var overloadParams = overload.GetParameters();
+                    for (var index = 0; index < parameters.Length - 1; index++)
+                    {
+                        var parameterInfo = overloadParams[index];
+                        paramBuilder.Append($"{parameterInfo.Name}: {parameterInfo.GetLuaType()}");
+                        if (index >= 0 && index < parameters.Length -2)
+                            paramBuilder.Append(", ");
+                    }
+                    
+                    builder.Append($"---@overload fun({paramBuilder}): {overload.ReturnParameter?.Name}\n");
+                }
+            }
+
+            builder.Append($"{type.Name.Replace("Script","")}.{methodInfo.Name} = function({parameterText}) end\n");
+        }
         return builder.ToString();
     }
-
-    private static readonly Dictionary<string, string> LuaTypes = new Dictionary<string, string>()
+    public static string GetLuaReturnType(this MethodInfo mi)
     {
-        {"System.Int32","integer"},
-        {"System.Int64","integer"},
-        {"System.Single","number"},
-        {"MoonSharp.Interpreter.Table","table"},
-        {"System.Boolean","boolean"},
-        {"System.String","string"},
-    };
-
+        var name = mi.ReturnType.ToString();
+        foreach (var pair in LuaTypes.Where(pair => name.Contains(pair.Key)))
+        {
+            return name.Replace(pair.Key, pair.Value);
+        }
+        return name;
+    }
+    public static string GetLuaType(this ParameterInfo mi)
+    {
+        var name = mi.ParameterType.ToString();
+        foreach (var pair in LuaTypes.Where(pair => name.Contains(pair.Key)))
+        {
+            return name.Replace(pair.Key, pair.Value);
+        }
+        return name;
+    }
     public static string GetLuaType(this PropertyInfo mi)
     {
         var name = mi.PropertyType.ToString();
@@ -303,7 +399,7 @@ public static class ReflectionExtensions
         }
         return name;
     }
-
+    
     public static Type[] GetTypesContainsAttribute(this Assembly assembly, string attribute)
     {
         var list = new List<Type>();
