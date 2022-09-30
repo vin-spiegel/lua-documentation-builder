@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Data;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -126,8 +127,7 @@ public static class DocumentationExtensions
     {
         var element = methodInfo.GetDocumentation();
         var res = element?.SelectSingleNode("exclude");
-        return res == null;
-        return true;
+        return res != null;
     }
     
     public static bool IsExcluded(this Type type)
@@ -244,31 +244,37 @@ public static class DocumentationExtensions
 
 public static class ReflectionExtensions
 {
-    private static string[] _withinGlobals = new[]
+    private static readonly string[] _withinGlobals = new[]
     {
         "Equals",
         "GetHashCode",
         "GetType",
         "ToString",
         "op_Implicit",
-        "ctor"
+        "ctor",
+        "System.Void"
     };
     
-    private static readonly Dictionary<string, string> LuaTypes = new Dictionary<string, string>()
+    private static readonly Dictionary<string, string> SystemLuaTypes = new Dictionary<string, string>()
     {
         {"System.UInt32","integer"},
         {"System.Int32","integer"},
         {"System.Int64","integer"},
         {"System.Single","number"},
+        {"System.Double","number"},
         {"MoonSharp.Interpreter.Table","table"},
+        {"System.Collections.Generic.List`1[network.TItemOption]","network.TItemOption[]"},
+        {"System.Collections.Generic.List`1[network.TItem]","network.TItem[]"},
         {"System.Boolean","boolean"},
         {"System.String","string"},
+        {"System.Object","any"},
+        {"System.Object[]","any[]"},
         {"Null","nil"},
     };
 
-    private static bool isBasic(this MethodInfo mi) => _withinGlobals.Contains(mi.Name);
+    private static bool IsBasic(this MethodInfo mi) => _withinGlobals.Contains(mi.Name);
 
-    private static bool isGetterOrSetter(this MethodInfo mi) => 
+    private static bool IsGetterOrSetter(this MethodInfo mi) => 
         (mi.Name.StartsWith("get_") || mi.Name.StartsWith("set_"));
 
     private static MethodInfo[] _GetMethods(Type type, bool isOverloaded)
@@ -277,11 +283,9 @@ public static class ReflectionExtensions
         var within = new List<MethodInfo>();
         foreach (var mi in type.GetMethods())
         {
-            if (mi.IsExcluded())
+            if (mi.IsBasic())
                 continue;
-            if (mi.isBasic())
-                continue;
-            if (mi.isGetterOrSetter()) // Within Getter Setter
+            if (mi.IsGetterOrSetter()) // Within Getter Setter
                 continue;
             if (list.Exists(x => x.Name == mi.Name)) // within Overload
             {
@@ -312,20 +316,27 @@ public static class ReflectionExtensions
         {
             if (prop.IsExcluded())
                 continue;
-            if (prop.GetSummary() != "")
-                builder.Append($"---{prop.GetSummary()}\n");
+            if (prop.GetSummary() == "")
+                continue;
+            
+            builder.Append($"---{prop.GetSummary()}\n");
             var line = $"---@field {prop.Name} {prop.GetLuaType()}\n";
             builder.Append(line);
         }
 
-        builder.Append($"local {type.Name.Replace("Script", "")} = {{}}");
-
         var methods = type.GetMethodsEx();
         var overloaded = type.GetOverloadedMethods();
+        
+        if (methods.Length > 0)
+            builder.Append($"local {type.Name.Replace("Script", "")} = {{}}\n");
+
         
         // Build Methods
         foreach (var methodInfo in methods)
         {
+            if (methodInfo.IsExcluded())
+                continue;
+
             var summary = methodInfo.GetSummary();
             if (summary != "")
                 builder.Append($"---{summary}\n");
@@ -354,6 +365,9 @@ public static class ReflectionExtensions
             {
                 foreach (var overload in overloads)
                 {
+                    if (overload.IsExcluded())
+                        continue;
+                    
                     var paramBuilder = new StringBuilder();
                     var overloadParams = overload.GetParameters();
                     for (var index = 0; index < parameters.Length - 1; index++)
@@ -364,53 +378,98 @@ public static class ReflectionExtensions
                             paramBuilder.Append(", ");
                     }
                     
-                    builder.Append($"---@overload fun({paramBuilder}): {overload.ReturnParameter?.Name}\n");
+                    builder.Append($"---@overload fun({paramBuilder})");
+                    if (!overload.ReturnType.ToString().Contains("Void"))
+                        builder.Append($": {overload.ReturnParameter.GetLuaType()}");
+                    builder.Append("\n");
                 }
             }
 
             builder.Append($"{type.Name.Replace("Script","")}.{methodInfo.Name} = function({parameterText}) end\n");
         }
+        
         return builder.ToString();
     }
-    public static string GetLuaReturnType(this MethodInfo mi)
+
+    private static string GetLuaReturnType(this MethodInfo mi)
     {
         var name = mi.ReturnType.ToString();
-        foreach (var pair in LuaTypes.Where(pair => name.Contains(pair.Key)))
+        foreach (var pair in SystemLuaTypes.Where(pair => name.Contains(pair.Key)))
         {
             return name.Replace(pair.Key, pair.Value);
         }
         return name;
     }
-    public static string GetLuaType(this ParameterInfo mi)
+
+    private static string GetLuaType(this ParameterInfo mi)
     {
         var name = mi.ParameterType.ToString();
-        foreach (var pair in LuaTypes.Where(pair => name.Contains(pair.Key)))
+        foreach (var pair in SystemLuaTypes.Where(pair => name.Contains(pair.Key)))
         {
             return name.Replace(pair.Key, pair.Value);
         }
         return name;
     }
-    public static string GetLuaType(this PropertyInfo mi)
+
+    private static string GetLuaType(this PropertyInfo mi)
     {
         var name = mi.PropertyType.ToString();
-        foreach (var pair in LuaTypes.Where(pair => name.Contains(pair.Key)))
+        foreach (var pair in SystemLuaTypes.Where(pair => name.Contains(pair.Key)))
         {
             return name.Replace(pair.Key, pair.Value);
         }
         return name;
     }
     
-    public static Type[] GetTypesContainsAttribute(this Assembly assembly, string attribute)
+    public static Type[] GetTypesContainsAttribute(this Assembly assembly, string attribute) => 
+        assembly.GetTypes().Where(type => type.GetCustomAttributes().ToList().Exists(x => x.ToString().Contains(attribute))).Where(type => !type.IsExcluded()).ToArray();
+
+    private static bool CheckType(this Type[] types, Type type)
     {
-        var list = new List<Type>();
-        foreach (var type in assembly.GetTypes())
+        return (SystemLuaTypes.Keys.Contains(type.FullName) ||
+                types.Contains(type) || 
+                type.ToString().Contains("[]")) ||
+                type.ToString().Contains("System") ||
+                type.Name.Contains("Void") || 
+                type.Name.Contains("List");
+    }
+
+    public static Type[] GetRequireTypes(this Assembly assembly, string attribute)
+    {
+        var store = new HashSet<Type>();
+        var types = GetTypesContainsAttribute(assembly, attribute);
+        foreach (var type in types)
         {
-            if (!type.GetCustomAttributes().ToList().Exists(x => x.ToString().Contains(attribute))) 
-                continue;
-            if (type.IsExcluded())
-                continue;
-            list.Add(type);
+            store.Add(type.BaseType);
+            var props = type.GetProperties();
+            foreach (var propertyInfo in props)
+            {
+                var propType = propertyInfo.PropertyType;
+                if (!types.CheckType(propType))
+                    store.Add(propType);
+            }
+
+            var methods = type.GetMethodsEx();
+            foreach (var methodInfo in methods)
+            {
+                if (methodInfo.IsExcluded())
+                    continue;
+                
+                var parameters = methodInfo.GetParameters();
+                foreach (var parameterInfo in parameters)
+                {
+                    var parameterType = parameterInfo.ParameterType;
+                    if (!types.CheckType(parameterType))
+                        store.Add(parameterType);
+                }
+
+                var returnType = methodInfo.ReturnType;
+                if (!types.CheckType(returnType)) 
+                {
+                    store.Add(returnType);
+                }
+            }
         }
-        return list.ToArray();
+        return store.ToArray();
     }
 }

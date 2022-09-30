@@ -18,12 +18,18 @@ namespace LDocBuilder
         public Program()
         {
             var assembly = Assembly.LoadFrom(@"C:\Projects\nekorpg-new\Creator\bin\Debug\Creator.exe");
-
             var list = assembly.GetTypesContainsAttribute("MoonSharp");
             foreach (var type in list)
             {
                 var doc = type.GetLuaDocumentation();
                 File.WriteAllText($@"d:\LDocs\{type.Name}.lua", $"{doc}", Encoding.UTF8);
+            }
+
+            var requires = assembly.GetRequireTypes("MoonSharp");
+            foreach (var require in requires)
+            {
+                // var doc = require.GetLuaDocumentation();
+                File.WriteAllText($@"d:\LDocs\{require.Name}.lua", $"---@class {require}", Encoding.UTF8);
             }
         }
     }
